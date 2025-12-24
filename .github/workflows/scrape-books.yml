@@ -1,7 +1,6 @@
 name: Scrape Ashtadhyayi Books
 
 on:
-  # Manual trigger with options
   workflow_dispatch:
     inputs:
       book:
@@ -32,7 +31,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360
 
     steps:
       - name: 📥 Checkout Repository
@@ -43,19 +42,21 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: 🌐 Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
       - name: 📦 Install Dependencies
         run: |
           pip install -r requirements.txt
-          # Install Chrome and ChromeDriver
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
+          # Verify Chrome is installed
+          google-chrome --version || chromium --version || echo "Chrome installed via action"
 
       - name: 🕉️ Run Scraper
         run: |
-          # Build command with optional limit
           CMD="python scraper/ashtadhyayi_scraper.py --book ${{ inputs.book }} --output ./books --delay ${{ inputs.delay }}"
           
-          # Add limit if provided
           if [ -n "${{ inputs.limit }}" ]; then
             CMD="$CMD --limit ${{ inputs.limit }}"
           fi
@@ -73,9 +74,5 @@ jobs:
       - name: 📊 Show Summary
         run: |
           echo "## 📚 Scrape Complete!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Book:** ${{ inputs.book }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Limit:** ${{ inputs.limit || 'None (full scrape)' }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Files Created:" >> $GITHUB_STEP_SUMMARY
-          find ./books -name "*.md" | wc -l >> $GITHUB_STEP_SUMMARY
+          echo "**Files Created:** $(find ./books -name '*.md' | wc -l)" >> $GITHUB_STEP_SUMMARY
