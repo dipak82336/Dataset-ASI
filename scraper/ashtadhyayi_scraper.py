@@ -260,29 +260,114 @@ class AshtadhyayiScraper:
         return "".join(self.DEVA_TO_ENG.get(c, c) for c in str(text))
     
     def _html_to_markdown(self, html: str) -> str:
-        """Convert HTML content to Markdown"""
+        """Convert HTML content to well-formatted Markdown - keeps paragraphs together"""
         if not html:
             return ""
         
         soup = BeautifulSoup(html, 'html.parser')
-        text = str(soup)
         
-        # Convert formatting tags
-        text = re.sub(r'<b\s*[^>]*>([^<]*)</b>', r'**\1**', text, flags=re.DOTALL)
-        text = re.sub(r'<strong\s*[^>]*>([^<]*)</strong>', r'**\1**', text, flags=re.DOTALL)
-        text = re.sub(r'<i\s*[^>]*>([^<]*)</i>', r'*\1*', text, flags=re.DOTALL)
-        text = re.sub(r'<em\s*[^>]*>([^<]*)</em>', r'*\1*', text, flags=re.DOTALL)
+        # First pass: Mark paragraph boundaries with special markers
+        PARA_BREAK = "\n\n【PARA】\n\n"
+        LINE_BREAK = "\n"
         
-        # Convert line breaks
-        text = re.sub(r'<br\s*/?>', '\n', text)
-        text = re.sub(r'<br[^>]*class="newline-space"[^>]*/?>', '\n\n', text)
+        # Handle prakriya (derivation) boxes - convert to blockquotes
+        for prakriya in soup.select('.prakriya, .derivation, .prakriya-box'):
+            text = prakriya.get_text(strip=True)
+            if text:
+                new_tag = soup.new_string(f"{PARA_BREAK}> {text}{PARA_BREAK}")
+                prakriya.replace_with(new_tag)
         
-        # Remove remaining HTML tags
-        text = re.sub(r'<[^>]+>', '', text)
+        # Handle section headers (major section titles)
+        for header in soup.select('.section-header, h3, h4, h5'):
+            text = header.get_text(strip=True)
+            if text:
+                new_tag = soup.new_string(f"{PARA_BREAK}### {text}{PARA_BREAK}")
+                header.replace_with(new_tag)
         
-        # Clean up whitespace
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        # Handle bold text inline
+        for bold in soup.select('b, strong'):
+            text = bold.get_text(strip=True)
+            if text:
+                bold.replace_with(f"**{text}**")
+        
+        # Handle font-weight-bold (often key terms)
+        for bold in soup.select('.font-weight-bold, .bigtext-font'):
+            text = bold.get_text(strip=True)
+            if text:
+                bold.replace_with(f"**{text}**")
+        
+        # Handle italic text inline
+        for italic in soup.select('i, em'):
+            text = italic.get_text(strip=True)
+            if text:
+                italic.replace_with(f"*{text}*")
+        
+        # Handle <br> as line breaks within paragraph
+        for br in soup.select('br'):
+            br.replace_with(LINE_BREAK)
+        
+        # Handle section separators as paragraph breaks
+        for sep in soup.select('.section-separator, hr'):
+            sep.replace_with(f"{PARA_BREAK}---{PARA_BREAK}")
+        
+        # Handle divs with significant margin as paragraph breaks
+        for div in soup.select('div.mt-3, div.mt-4, div.mb-3, div.mb-4'):
+            # Add paragraph break before and after
+            text = div.get_text(strip=True)
+            if text:
+                div.replace_with(f"{PARA_BREAK}{text}{PARA_BREAK}")
+        
+        # Handle links - convert to inline
+        for link in soup.select('a'):
+            text = link.get_text(strip=True)
+            href = link.get('href', '')
+            if text and href:
+                link.replace_with(f"[{text}]({href})")
+            elif text:
+                link.replace_with(text)
+        
+        # Get text with single space separator (not newline!)
+        # This keeps inline text together
+        text = soup.get_text(separator=' ')
+        
+        # Clean up the text
+        # Replace multiple spaces with single space
         text = re.sub(r'[ \t]+', ' ', text)
+        
+        # Process paragraph markers
+        # Split by paragraph markers
+        paragraphs = text.split('【PARA】')
+        
+        result_paragraphs = []
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Handle derivation arrows - format nicely
+            if '→' in para and not para.startswith('>'):
+                # Split derivation steps
+                steps = para.split('→')
+                if len(steps) > 1:
+                    formatted_steps = []
+                    for i, step in enumerate(steps):
+                        step = step.strip()
+                        if step:
+                            if i == 0:
+                                formatted_steps.append(step)
+                            else:
+                                formatted_steps.append(f"→ {step}")
+                    para = "\n\n".join(formatted_steps)
+            
+            result_paragraphs.append(para)
+        
+        # Join paragraphs with double newlines
+        text = '\n\n'.join(result_paragraphs)
+        
+        # Final cleanup
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'\*\*\s*\*\*', '', text)  # Remove empty bolds
+        text = re.sub(r'\s+([।॥,;:.])', r'\1', text)  # Fix punctuation spacing
         text = text.strip()
         
         return text
@@ -489,35 +574,87 @@ class AshtadhyayiScraper:
         
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Get title
-        title_elem = soup.select_one(".list-group-title")
+        # Get title from title-font or list-group-title
+        title_elem = soup.select_one(".title-font, .list-group-title")
         title = title_elem.get_text(strip=True) if title_elem else ""
         
-        # Parse number from title
-        parts = title.split(".", 1) if title else ["", ""]
+        # Parse number from title (format: १.१.१ वृद्धिरादैच्)
+        parts = title.split(" ", 1) if title else ["", ""]
         number = parts[0].strip()
         entry_title = parts[1].strip() if len(parts) > 1 else title
         
         # Get main content and sections
         sections = {}
         main_content = ""
+        summary_content = ""
         
-        content_items = soup.select("#list-group-content .list-group-item, .list-group-content .list-group-item")
+        # === EXTRACT SUMMARY SECTION (पदच्छेद, अनुवृत्ति, etc.) ===
+        summary_region = soup.select_one("#sutra-summary-region")
+        if summary_region:
+            summary_items = []
+            for item in summary_region.select(".list-group-item, .row"):
+                label_elem = item.select_one(".col-3, .col-4, .text-muted, label")
+                value_elem = item.select_one(".col-9, .col-8")
+                if label_elem and value_elem:
+                    label = label_elem.get_text(strip=True).rstrip(':')
+                    value = value_elem.get_text(strip=True)
+                    if label and value:
+                        summary_items.append(f"**{label}:** {value}")
+                else:
+                    # Single item
+                    text = item.get_text(strip=True)
+                    if text and len(text) < 200:
+                        summary_items.append(text)
+            
+            if summary_items:
+                summary_content = "\n\n".join(summary_items)
         
-        for i, item in enumerate(content_items):
-            section_title = item.select_one(".list-item-title span, .list-item-title")
-            if section_title:
-                section_name = section_title.get_text(strip=True)
-                content_elem = item.select_one(".ml-2") or item
-                html_content = content_elem.decode_contents() if hasattr(content_elem, 'decode_contents') else str(content_elem)
-                sections[section_name] = self._html_to_markdown(html_content)
-            else:
-                item_html = item.decode_contents() if hasattr(item, 'decode_contents') else str(item)
-                item_text = self._html_to_markdown(item_html)
-                if i == 0:
-                    main_content = item_text
-                elif item_text:
-                    sections[f"Additional_{i}"] = item_text
+        # === EXTRACT MAIN MEANING (Short definition) ===
+        short_meaning = ""
+        short_elem = soup.select_one(".bigtext-font, .sutra-meaning-short")
+        if short_elem:
+            short_meaning = f"**{short_elem.get_text(strip=True)}**"
+        
+        # === EXTRACT MAIN EXPLANATION from sutrartha region ===
+        sutrartha = soup.select_one("#sutra-commentary-sutrartha-region .sutra-commentary")
+        if sutrartha:
+            main_content = self._html_to_markdown(sutrartha.decode_contents())
+        
+        # Combine short meaning with main content
+        if short_meaning and main_content:
+            main_content = f"{short_meaning}\n\n{main_content}"
+        elif short_meaning:
+            main_content = short_meaning
+        
+        # Add summary to sections if available
+        if summary_content:
+            sections["सूत्र-विवरण (Summary)"] = summary_content
+        
+        # === GET ALL COMMENTARY SECTIONS ===
+        commentary_regions = soup.select("[id^='sutra-commentary-'][id$='-region']")
+        for region in commentary_regions:
+            # Skip sutrartha (already captured as main content)
+            if 'sutrartha' in region.get('id', ''):
+                continue
+            
+            # Get section title
+            title_elem = region.select_one(".list-item-title-color")
+            section_name = title_elem.get_text(strip=True) if title_elem else ""
+            if not section_name:
+                continue
+            
+            # Get section content
+            content_elem = region.select_one(".sutra-commentary")
+            if content_elem:
+                content_text = self._html_to_markdown(content_elem.decode_contents())
+                if content_text.strip():
+                    sections[section_name] = content_text
+        
+        # Fallback: If no sutrartha found, try getting from first list-group-item
+        if not main_content:
+            first_content = soup.select_one(".bigtext-font, .font-weight-bold")
+            if first_content:
+                main_content = first_content.get_text(strip=True)
         
         return {
             'number': number,
@@ -710,17 +847,34 @@ class AshtadhyayiScraper:
 |:---:|:-----|:--------|
 """
         
+        config = BOOK_CONFIGS.get(book.book_type, {})
+        organize_by = config.get('organize_by', 'flat')
+        
         for chapter in book.chapters:
             for entry in chapter.entries:
                 eng_num = self._deva_to_english(entry.number)
-                filename = self._get_entry_filename(entry)
+                
+                # Generate correct file path based on organization
+                if organize_by == 'adhyaya_pada' and hasattr(entry, 'metadata') and entry.metadata.get('adhyaya'):
+                    adhyaya = entry.metadata.get('adhyaya', '1')
+                    pada = entry.metadata.get('pada', '1')
+                    sutra = entry.metadata.get('sutra', '1')
+                    filepath = f"adhyaya_{adhyaya}/pada_{pada}/sutra_{str(sutra).zfill(3)}.md"
+                elif '.' in eng_num and organize_by == 'adhyaya_pada':
+                    parts = eng_num.split('.')
+                    if len(parts) >= 3:
+                        filepath = f"adhyaya_{parts[0]}/pada_{parts[1]}/sutra_{parts[2].zfill(3)}.md"
+                    else:
+                        filepath = self._get_entry_filename(entry)
+                else:
+                    filepath = self._get_entry_filename(entry)
                 
                 # Add metadata if available
                 extra = ""
                 if entry.metadata.get('kaumudi'):
                     extra = f" ({entry.metadata['kaumudi']})"
                 
-                readme += f"| {entry.number} | **{entry.title}**{extra} | [{filename}](./{filename}) |\n"
+                readme += f"| {entry.number} | **{entry.title}**{extra} | [{filepath}](./{filepath}) |\n"
         
         readme += f"""
 ---
