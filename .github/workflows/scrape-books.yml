@@ -1,0 +1,82 @@
+name: Scrape Ashtadhyayi Books
+
+on:
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      book:
+        description: 'Book to scrape'
+        required: true
+        default: 'shivasutra'
+        type: choice
+        options:
+          - shivasutra
+          - sutraani
+          - dhatu
+          - pratyahara
+          - ganapatha
+          - unadipatha
+          - linganushasanam
+          - shiksha
+      limit:
+        description: 'Limit entries (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+      delay:
+        description: 'Delay between requests (seconds)'
+        required: false
+        default: '1.5'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: |
+          pip install selenium beautifulsoup4
+          # Install Chrome and ChromeDriver
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+
+      - name: 🕉️ Run Scraper
+        run: |
+          # Build command with optional limit
+          CMD="python scraper/ashtadhyayi_scraper.py --book ${{ inputs.book }} --output ./books --delay ${{ inputs.delay }}"
+          
+          # Add limit if provided
+          if [ -n "${{ inputs.limit }}" ]; then
+            CMD="$CMD --limit ${{ inputs.limit }}"
+          fi
+          
+          echo "Running: $CMD"
+          $CMD
+
+      - name: 📁 Upload Books
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.book }}-books
+          path: ./books/
+          retention-days: 30
+
+      - name: 📊 Show Summary
+        run: |
+          echo "## 📚 Scrape Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Book:** ${{ inputs.book }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Limit:** ${{ inputs.limit || 'None (full scrape)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Files Created:" >> $GITHUB_STEP_SUMMARY
+          find ./books -name "*.md" | wc -l >> $GITHUB_STEP_SUMMARY
